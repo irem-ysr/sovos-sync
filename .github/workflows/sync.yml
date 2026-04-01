@@ -2,7 +2,7 @@ name: Sovos Sync
 
 on:
   schedule:
-    - cron: "5,20,35,50 6-18 * * *"
+    - cron: "*/5 6-18 * * *"
   workflow_dispatch:
 
 jobs:
