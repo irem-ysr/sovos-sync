@@ -12,6 +12,9 @@ from google_sheets_writer import GoogleSheetsWriter
 OUTGOING_HEADERS = ["Oluşturulma Tarihi", "Alıcı", "Tutar", "Fatura No", "Tür"]
 INCOMING_HEADERS = ["Oluşturulma Tarihi", "Alıcı", "Tutar", "Fatura No", "Tür"]
 
+META_SHEET_NAME = "_meta"
+LAST_SYNC_KEY = "last_sync"
+
 
 def safe_get(record: dict, *keys, default="") -> Any:
     for key in keys:
@@ -121,9 +124,42 @@ def dedupe_rows_by_invoice_no(rows: list[list[str]]) -> list[list[str]]:
     return output
 
 
+def get_last_sync_time(writer: GoogleSheetsWriter) -> datetime:
+    ws = writer.get_or_create_sheet(META_SHEET_NAME, rows=100, cols=2)
+    values = ws.get_all_values()
+
+    for row in values:
+        if len(row) >= 2 and row[0].strip() == LAST_SYNC_KEY:
+            try:
+                return datetime.fromisoformat(row[1].strip())
+            except Exception:
+                pass
+
+    # ilk çalıştırma fallback
+    return datetime.now() - timedelta(days=config.LOOKBACK_DAYS)
+
+
+def update_last_sync_time(writer: GoogleSheetsWriter, sync_time: datetime) -> None:
+    ws = writer.get_or_create_sheet(META_SHEET_NAME, rows=100, cols=2)
+    ws.clear()
+    ws.update("A1", [["key", "value"], [LAST_SYNC_KEY, sync_time.isoformat()]])
+
+
 def main() -> None:
-    start_date = datetime.now() - timedelta(days=config.LOOKBACK_DAYS)
-    end_date = datetime.now()
+    print("Google Sheets'e bağlanılıyor...")
+    writer = GoogleSheetsWriter(
+        service_account_file=str(config.GOOGLE_SERVICE_ACCOUNT_FILE),
+        spreadsheet_name=config.SPREADSHEET_NAME,
+    )
+
+    now = datetime.now()
+    last_sync = get_last_sync_time(writer)
+
+    # güvenlik overlap'i: son 10 dakikayı tekrar tara
+    start_date = last_sync - timedelta(minutes=10)
+    end_date = now
+
+    print(f"Sync aralığı: {start_date} -> {end_date}")
 
     print(f"SOAP bağlanıyor: {config.WSDL_URL}")
     dp = DigitalPlanetClient(
@@ -170,24 +206,16 @@ def main() -> None:
     incoming_rows.sort(key=lambda r: parse_date_for_sort(r[0]))
 
     print("Google Sheets'e yazılıyor...")
-    writer = GoogleSheetsWriter(
-        service_account_file=str(config.GOOGLE_SERVICE_ACCOUNT_FILE),
-        spreadsheet_name=config.SPREADSHEET_NAME,
-    )
 
-    # başlıkları garanti altına al
     writer.ensure_headers(config.OUTGOING_SHEET_NAME, OUTGOING_HEADERS)
     writer.ensure_headers(config.INCOMING_SHEET_NAME, INCOMING_HEADERS)
 
-    # mevcut fatura numaralarını oku
     existing_outgoing = writer.get_existing_invoice_numbers(config.OUTGOING_SHEET_NAME)
     existing_incoming = writer.get_existing_invoice_numbers(config.INCOMING_SHEET_NAME)
 
-    # sadece yeni olanları bırak
     new_outgoing = [r for r in outgoing_rows if r[3] not in existing_outgoing]
     new_incoming = [r for r in incoming_rows if r[3] not in existing_incoming]
 
-    # yeni eklenenler de kendi içinde tarih sıralı olsun
     new_outgoing.sort(key=lambda r: parse_date_for_sort(r[0]))
     new_incoming.sort(key=lambda r: parse_date_for_sort(r[0]))
 
@@ -196,6 +224,8 @@ def main() -> None:
 
     writer.append_rows(config.OUTGOING_SHEET_NAME, new_outgoing)
     writer.append_rows(config.INCOMING_SHEET_NAME, new_incoming)
+
+    update_last_sync_time(writer, now)
 
     print("Tamamlandı.")
 
