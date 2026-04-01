@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+TR_TZ = timezone(timedelta(hours=3))
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -136,7 +137,7 @@ def get_last_sync_time(writer: GoogleSheetsWriter) -> datetime:
                 pass
 
     # ilk çalıştırma fallback
-    return datetime.now() - timedelta(days=config.LOOKBACK_DAYS)
+    return datetime.now(TR_TZ) - timedelta(days=config.LOOKBACK_DAYS)
 
 
 def update_last_sync_time(writer: GoogleSheetsWriter, sync_time: datetime) -> None:
@@ -152,7 +153,7 @@ def main() -> None:
         spreadsheet_name=config.SPREADSHEET_NAME,
     )
 
-    now = datetime.now()
+    now = datetime.now(TR_TZ)
     last_sync = get_last_sync_time(writer)
 
     # güvenlik overlap'i: son 10 dakikayı tekrar tara
