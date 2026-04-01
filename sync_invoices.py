@@ -46,7 +46,7 @@ def parse_amount(value: Any) -> str:
     text = str(value).replace(",", ".").strip()
     try:
         amount = Decimal(text)
-        return f"{amount:.2f}".replace(".", ",")
+        return f"{amount:.2f}"
     except (InvalidOperation, ValueError):
         return str(value)
 
