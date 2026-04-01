@@ -2,8 +2,7 @@ name: Sovos Sync
 
 on:
   schedule:
-    - cron: "2-57/5 * * * *"
-      timezone: "Europe/Istanbul"
+    - cron: "* * * * *"
   workflow_dispatch:
 
 jobs:
