@@ -20,6 +20,9 @@ class GoogleSheetsWriter:
         except gspread.WorksheetNotFound:
             return self.spreadsheet.add_worksheet(title=title, rows=rows, cols=cols)
 
+    def get_or_create_sheet(self, title: str, rows: int = 5000, cols: int = 10):
+        return self._get_or_create_worksheet(title, rows=rows, cols=cols)
+
     def ensure_headers(self, title: str, headers: list[str]) -> None:
         ws = self._get_or_create_worksheet(title)
         current = ws.row_values(1)
@@ -37,7 +40,6 @@ class GoogleSheetsWriter:
 
         invoice_nos = set()
 
-        # ilk satır header kabul ediliyor
         for row in values[1:]:
             if len(row) >= 4:
                 invoice_no = row[3].strip()
