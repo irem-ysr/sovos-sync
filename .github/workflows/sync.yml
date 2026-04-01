@@ -1,0 +1,52 @@
+name: Sovos Sync
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+
+jobs:
+  run-script:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Repo cek
+        uses: actions/checkout@v4
+
+      - name: Python kur
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Paketleri kur
+        run: pip install -r requirements.txt
+
+      - name: Google JSON olustur
+        shell: bash
+        run: |
+          echo "${{ secrets.GOOGLE_JSON_BASE64 }}" | base64 --decode > google-service-account.json
+
+      - name: Config olustur
+        shell: bash
+        run: |
+          cat > config.py <<EOF
+          from pathlib import Path
+
+          WSDL_URL = "https://integrationservicewithoutmtom.digitalplanet.com.tr/IntegrationService.asmx?WSDL"
+          SERVICE_URL = "https://integrationservicewithoutmtom.digitalplanet.com.tr/IntegrationService.asmx"
+
+          CORPORATE_CODE = "${{ secrets.CORPORATE_CODE }}"
+          LOGIN_NAME = "${{ secrets.LOGIN_NAME }}"
+          PASSWORD = "${{ secrets.PASSWORD }}"
+
+          GOOGLE_SERVICE_ACCOUNT_FILE = Path("google-service-account.json")
+          SPREADSHEET_NAME = "Sovos Fatura Takibi"
+          OUTGOING_SHEET_NAME = "Giden Faturalar"
+          INCOMING_SHEET_NAME = "Gelen Faturalar"
+
+          LOOKBACK_DAYS = 3
+          SOAP_TIMEOUT_SECONDS = 300
+          EOF
+
+      - name: Script calistir
+        run: python sync_invoices.py
