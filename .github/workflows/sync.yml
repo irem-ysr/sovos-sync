@@ -2,7 +2,8 @@ name: Sovos Sync
 
 on:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "*/5 9-23 * * *"
+      timezone: "Europe/Istanbul"
   workflow_dispatch:
 
 jobs:
@@ -44,7 +45,7 @@ jobs:
           OUTGOING_SHEET_NAME = "Giden Faturalar"
           INCOMING_SHEET_NAME = "Gelen Faturalar"
 
-          LOOKBACK_DAYS = 3
+          LOOKBACK_DAYS = 1
           SOAP_TIMEOUT_SECONDS = 300
           EOF
 
