@@ -1,0 +1,6 @@
+zeep
+gspread
+google-auth
+python-dateutil
+requests
+urllib3
