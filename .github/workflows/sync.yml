@@ -44,7 +44,7 @@ jobs:
           OUTGOING_SHEET_NAME = "Giden Faturalar"
           INCOMING_SHEET_NAME = "Gelen Faturalar"
 
-          LOOKBACK_DAYS = 1
+          LOOKBACK_DAYS = 3
           SOAP_TIMEOUT_SECONDS = 300
           EOF
 
