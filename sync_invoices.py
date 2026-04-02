@@ -157,7 +157,7 @@ def main() -> None:
     last_sync = get_last_sync_time(writer)
 
     # güvenlik overlap'i: son 10 dakikayı tekrar tara
-    start_date = last_sync - timedelta(minutes=10)
+    start_date = last_sync - timedelta(minutes=600)
     end_date = now
 
     print(f"Sync aralığı: {start_date} -> {end_date}")
