@@ -1,210 +1,179 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from config import (
-    CORPORATE_CODE,
-    GOOGLE_SERVICE_ACCOUNT_FILE,
-    INCOMING_SHEET_NAME,
-    LOGIN_NAME,
-    OUTGOING_SHEET_NAME,
-    PASSWORD,
-    SERVICE_URL,
-    SOAP_TIMEOUT_SECONDS,
-    SPREADSHEET_NAME,
-    WSDL_URL,
-)
+import config
 from digitalplanet_client import DigitalPlanetClient
 from google_sheets_writer import GoogleSheetsWriter
+
+
+TR_TZ = timezone(timedelta(hours=3))
+
+OUTGOING_HEADERS = ["Oluşturulma Tarihi", "Alıcı", "Tutar", "Fatura No", "Tür"]
+INCOMING_HEADERS = ["Oluşturulma Tarihi", "Alıcı", "Tutar", "Fatura No", "Tür"]
 
 META_SHEET_NAME = "_meta"
 LAST_SYNC_KEY = "last_sync"
 
 
-def safe_get(obj: Any, *keys: str, default: Any = "") -> Any:
-    if obj is None:
-        return default
-
-    if isinstance(obj, dict):
-        lowered = {str(k).lower(): v for k, v in obj.items()}
-        for key in keys:
-            if key in obj:
-                return obj[key]
-            val = lowered.get(str(key).lower())
-            if val is not None:
-                return val
-
+def safe_get(record: dict, *keys, default="") -> Any:
     for key in keys:
-        if hasattr(obj, key):
-            return getattr(obj, key)
-
+        if key in record and record[key] is not None:
+            return record[key]
     return default
 
 
-def extract_invoices(pack: Any) -> list[dict]:
-    if not pack:
-        return []
-
-    if isinstance(pack, dict):
-        invoices = safe_get(pack, "Invoices", "invoices", default=[])
-        if invoices is None:
-            return []
-        if isinstance(invoices, list):
-            return invoices
-        return [invoices]
-
-    invoices = getattr(pack, "Invoices", None)
-    if invoices is None:
-        return []
-
-    if isinstance(invoices, list):
-        return invoices
-    return [invoices]
-
-
-def to_iso(value: Any) -> str:
-    if value is None or value == "":
+def parse_date(value: Any) -> str:
+    if not value:
         return ""
     if isinstance(value, datetime):
-        return value.isoformat(sep=" ", timespec="seconds")
-    return str(value)
+        return value.strftime("%d.%m.%Y %H:%M")
+    text = str(value)
+    return text.replace("T", " ")[:16] if "T" in text else text
 
 
-def to_decimal_str(value: Any) -> str:
+def parse_date_for_sort(date_str: str) -> datetime:
+    try:
+        return datetime.strptime(date_str, "%d.%m.%Y %H:%M")
+    except Exception:
+        return datetime.min
+
+
+def parse_amount(value: Any) -> str:
     if value in (None, ""):
         return ""
+    text = str(value).replace(",", ".").strip()
     try:
-        dec = Decimal(str(value))
-        return format(dec, "f")
+        amount = Decimal(text)
+        return f"{amount:.2f}"
     except (InvalidOperation, ValueError):
         return str(value)
 
 
-def normalize_outgoing_record(inv: Any) -> list[str]:
-    created = safe_get(inv, "Createdate", "CreateDate", "IssueDate", default="")
-    party = safe_get(inv, "Partyname", "PartyName", default="")
-    payable = safe_get(inv, "Payableamount", "PayableAmount", default="")
-    invoice_id = safe_get(inv, "InvoiceId", "ID", default="")
-    status = safe_get(inv, "StatusDescription", "Status", default="")
-    uuid = safe_get(inv, "UUID", "Uuid", default="")
+def detect_type(record: dict, forced_type: str | None = None) -> str:
+    if forced_type:
+        return forced_type
 
+    direction = str(safe_get(record, "Direction", default="")).strip().lower()
+    profile_id = str(safe_get(record, "Profileid", "ProfileID", default="")).strip().upper()
+
+    if direction == "earchive":
+        return "e-Arşiv"
+
+    if "ARSIV" in profile_id:
+        return "e-Arşiv"
+
+    return "e-Fatura"
+
+
+def normalize_outgoing_record(record: dict, forced_type: str | None = None) -> list[str]:
     return [
-        to_iso(created),
-        str(party),
-        to_decimal_str(payable),
-        str(invoice_id),
-        str(status),
-        str(uuid),
+        parse_date(safe_get(record, "Createdate", "CreateDate", "IssueDate", "Issuedate")),
+        str(safe_get(record, "Partyname", "PartyName")).strip(),
+        parse_amount(safe_get(record, "Payableamount", "PayableAmount")),
+        str(safe_get(record, "InvoiceId", "InvoiceID")).strip(),
+        detect_type(record, forced_type=forced_type),
     ]
 
 
-def normalize_incoming_record(inv: Any) -> list[str]:
-    created = safe_get(inv, "Createdate", "CreateDate", "IssueDate", default="")
-    party = safe_get(inv, "Partyname", "PartyName", default="")
-    payable = safe_get(inv, "Payableamount", "PayableAmount", default="")
-    invoice_id = safe_get(inv, "InvoiceId", "ID", default="")
-    status = safe_get(inv, "StatusDescription", "Status", default="")
-    uuid = safe_get(inv, "UUID", "Uuid", default="")
-
+def normalize_incoming_record(record: dict, forced_type: str | None = None) -> list[str]:
     return [
-        to_iso(created),
-        str(party),
-        to_decimal_str(payable),
-        str(invoice_id),
-        str(status),
-        str(uuid),
+        parse_date(safe_get(record, "Createdate", "CreateDate", "IssueDate", "Issuedate")),
+        str(safe_get(record, "Partyname", "PartyName")).strip(),
+        parse_amount(safe_get(record, "Payableamount", "PayableAmount")),
+        str(safe_get(record, "InvoiceId", "InvoiceID")).strip(),
+        detect_type(record, forced_type=forced_type),
     ]
 
 
-def read_last_sync(writer: GoogleSheetsWriter) -> datetime | None:
-    rows = writer.read_sheet(META_SHEET_NAME)
-    if not rows:
-        return None
+def extract_invoices(pack_result: dict) -> list[dict]:
+    invoices = pack_result.get("Invoices")
+
+    if not invoices:
+        return []
+
+    if isinstance(invoices, dict):
+        inner = invoices.get("InvoiceInfoResult")
+
+        if isinstance(inner, list):
+            return inner
+
+        if isinstance(inner, dict):
+            return [inner]
+
+    if isinstance(invoices, list):
+        return invoices
+
+    return []
+
+
+def dedupe_rows_by_invoice_no(rows: list[list[str]]) -> list[list[str]]:
+    seen_invoice_nos = set()
+    output = []
 
     for row in rows:
-        if len(row) >= 2 and str(row[0]).strip() == LAST_SYNC_KEY:
-            raw = str(row[1]).strip()
-            if not raw:
-                return None
+        invoice_no = (row[3] or "").strip()
+
+        if not invoice_no:
+            continue
+
+        if invoice_no not in seen_invoice_nos:
+            seen_invoice_nos.add(invoice_no)
+            output.append(row)
+
+    return output
+
+
+def get_last_sync_time(writer: GoogleSheetsWriter) -> datetime:
+    ws = writer.get_or_create_sheet(META_SHEET_NAME, rows=100, cols=2)
+    values = ws.get_all_values()
+
+    for row in values:
+        if len(row) >= 2 and row[0].strip() == LAST_SYNC_KEY:
             try:
-                return datetime.fromisoformat(raw)
-            except ValueError:
-                return None
-    return None
+                return datetime.fromisoformat(row[1].strip())
+            except Exception:
+                pass
+
+    return datetime.now(TR_TZ) - timedelta(days=config.LOOKBACK_DAYS)
 
 
-def write_last_sync(writer: GoogleSheetsWriter, ts: datetime) -> None:
-    writer.clear_sheet(META_SHEET_NAME)
-    writer.write_rows(
-        META_SHEET_NAME,
-        [["key", "value"], [LAST_SYNC_KEY, ts.isoformat(sep=" ", timespec="seconds")]],
-    )
-
-
-def build_existing_keys(rows: list[list[Any]]) -> set[tuple[str, str, str]]:
-    keys: set[tuple[str, str, str]] = set()
-
-    for row in rows[1:]:
-        if len(row) < 4:
-            continue
-
-        created = str(row[0]).strip()
-        payable = str(row[2]).strip()
-        invoice_id = str(row[3]).strip()
-
-        if invoice_id:
-            keys.add((created, payable, invoice_id))
-
-    return keys
-
-
-def filter_new_rows(existing_rows: list[list[Any]], candidate_rows: list[list[str]]) -> list[list[str]]:
-    existing_keys = build_existing_keys(existing_rows)
-    new_rows: list[list[str]] = []
-
-    for row in candidate_rows:
-        if len(row) < 4:
-            continue
-
-        key = (str(row[0]).strip(), str(row[2]).strip(), str(row[3]).strip())
-        if key not in existing_keys:
-            new_rows.append(row)
-            existing_keys.add(key)
-
-    return new_rows
+def update_last_sync_time(writer: GoogleSheetsWriter, sync_time: datetime) -> None:
+    ws = writer.get_or_create_sheet(META_SHEET_NAME, rows=100, cols=2)
+    ws.clear()
+    ws.update("A1", [["key", "value"], [LAST_SYNC_KEY, sync_time.isoformat()]])
 
 
 def main() -> None:
-    now = datetime.now()
-
+    print("Google Sheets'e bağlanılıyor...")
     writer = GoogleSheetsWriter(
-        service_account_file=GOOGLE_SERVICE_ACCOUNT_FILE,
-        spreadsheet_name=SPREADSHEET_NAME,
+        service_account_file=str(config.GOOGLE_SERVICE_ACCOUNT_FILE),
+        spreadsheet_name=config.SPREADSHEET_NAME,
     )
 
-    last_sync = read_last_sync(writer)
+    now = datetime.now(TR_TZ)
+    last_sync = get_last_sync_time(writer)
 
-    if last_sync is None:
-        start_date = now - timedelta(days=3)
-        print(f"İlk senkronizasyon. Başlangıç tarihi: {start_date}")
-    else:
-        # Güvenlik overlap'i
-        start_date = last_sync - timedelta(minutes=600)
-        print(f"Son senkronizasyon bulundu: {last_sync}")
-        print(f"Overlap'li başlangıç tarihi: {start_date}")
-
+    # Güvenlik overlap'i
+    start_date = last_sync - timedelta(minutes=600)
     end_date = now
-    print(f"Bitiş tarihi: {end_date}")
 
+    print(f"Sync aralığı: {start_date} -> {end_date}")
+
+    print(f"SOAP bağlanıyor: {config.WSDL_URL}")
     dp = DigitalPlanetClient(
-        wsdl_url=WSDL_URL,
-        corporate_code=CORPORATE_CODE,
-        login_name=LOGIN_NAME,
-        password=PASSWORD,
-        timeout=SOAP_TIMEOUT_SECONDS,
+        wsdl_url=config.WSDL_URL,
+        corporate_code=config.CORPORATE_CODE,
+        login_name=config.LOGIN_NAME,
+        password=config.PASSWORD,
+        timeout=config.SOAP_TIMEOUT_SECONDS,
     )
+
+    print("Ticket alınıyor...")
+    dp.authenticate()
+    print("Ticket alındı.")
 
     print("Giden e-Faturalar çekiliyor...")
     outgoing_pack = dp.get_available_sent_invoices_by_date(start_date, end_date)
@@ -218,52 +187,54 @@ def main() -> None:
 
     print("Gelen faturalar çekiliyor...")
     incoming_pack = dp.get_available_invoices_by_date(start_date, end_date)
-    all_available_invoices = extract_invoices(incoming_pack)
+    available_invoices = extract_invoices(incoming_pack)
 
-    incoming_invoices: list[dict] = []
-    for inv in all_available_invoices:
+    incoming_invoices = []
+    for inv in available_invoices:
         direction = str(safe_get(inv, "Direction", default="")).strip().lower()
-        if "incoming" in direction:
+        if direction == "incoming":
             incoming_invoices.append(inv)
 
     print(f"Gelen kayıt sayısı: {len(incoming_invoices)}")
 
-    outgoing_rows = [normalize_outgoing_record(inv) for inv in outgoing_invoices]
-    earchive_rows = [normalize_outgoing_record(inv) for inv in earchive_invoices]
-    all_outgoing_rows = outgoing_rows + earchive_rows
+    outgoing_rows = [normalize_outgoing_record(inv, forced_type="e-Fatura") for inv in outgoing_invoices]
+    earchive_rows = [normalize_outgoing_record(inv, forced_type="e-Arşiv") for inv in earchive_invoices]
+    incoming_rows = [normalize_incoming_record(inv, forced_type="e-Fatura") for inv in incoming_invoices]
 
-    incoming_rows = [normalize_incoming_record(inv) for inv in incoming_invoices]
+    outgoing_rows = outgoing_rows + earchive_rows
 
-    outgoing_existing = writer.read_sheet(OUTGOING_SHEET_NAME)
-    incoming_existing = writer.read_sheet(INCOMING_SHEET_NAME)
+    outgoing_rows = [r for r in outgoing_rows if any(str(cell).strip() for cell in r)]
+    incoming_rows = [r for r in incoming_rows if any(str(cell).strip() for cell in r)]
 
-    if not outgoing_existing:
-        outgoing_existing = [["Oluşturulma Tarihi", "Firma Ünvanı", "Fatura Tutarı", "Fatura No", "Durum", "UUID"]]
-    if not incoming_existing:
-        incoming_existing = [["Oluşturulma Tarihi", "Firma Ünvanı", "Fatura Tutarı", "Fatura No", "Durum", "UUID"]]
+    outgoing_rows = dedupe_rows_by_invoice_no(outgoing_rows)
+    incoming_rows = dedupe_rows_by_invoice_no(incoming_rows)
 
-    new_outgoing_rows = filter_new_rows(outgoing_existing, all_outgoing_rows)
-    new_incoming_rows = filter_new_rows(incoming_existing, incoming_rows)
+    outgoing_rows.sort(key=lambda r: parse_date_for_sort(r[0]))
+    incoming_rows.sort(key=lambda r: parse_date_for_sort(r[0]))
 
-    print(f"Yeni giden kayıt sayısı: {len(new_outgoing_rows)}")
-    print(f"Yeni gelen kayıt sayısı: {len(new_incoming_rows)}")
+    print("Google Sheets'e yazılıyor...")
 
-    if len(outgoing_existing) <= 1:
-        writer.clear_sheet(OUTGOING_SHEET_NAME)
-        writer.write_rows(OUTGOING_SHEET_NAME, outgoing_existing[:1])
+    writer.ensure_headers(config.OUTGOING_SHEET_NAME, OUTGOING_HEADERS)
+    writer.ensure_headers(config.INCOMING_SHEET_NAME, INCOMING_HEADERS)
 
-    if len(incoming_existing) <= 1:
-        writer.clear_sheet(INCOMING_SHEET_NAME)
-        writer.write_rows(INCOMING_SHEET_NAME, incoming_existing[:1])
+    existing_outgoing = writer.get_existing_invoice_numbers(config.OUTGOING_SHEET_NAME)
+    existing_incoming = writer.get_existing_invoice_numbers(config.INCOMING_SHEET_NAME)
 
-    if new_outgoing_rows:
-        writer.append_rows(OUTGOING_SHEET_NAME, new_outgoing_rows)
+    new_outgoing = [r for r in outgoing_rows if r[3] not in existing_outgoing]
+    new_incoming = [r for r in incoming_rows if r[3] not in existing_incoming]
 
-    if new_incoming_rows:
-        writer.append_rows(INCOMING_SHEET_NAME, new_incoming_rows)
+    new_outgoing.sort(key=lambda r: parse_date_for_sort(r[0]))
+    new_incoming.sort(key=lambda r: parse_date_for_sort(r[0]))
 
-    write_last_sync(writer, now)
-    print("Senkronizasyon tamamlandı.")
+    print(f"Yeni giden fatura sayısı: {len(new_outgoing)}")
+    print(f"Yeni gelen fatura sayısı: {len(new_incoming)}")
+
+    writer.append_rows(config.OUTGOING_SHEET_NAME, new_outgoing)
+    writer.append_rows(config.INCOMING_SHEET_NAME, new_incoming)
+
+    update_last_sync_time(writer, now)
+
+    print("Tamamlandı.")
 
 
 if __name__ == "__main__":
